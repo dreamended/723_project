@@ -1,13 +1,44 @@
 import csv
+import sqlite3
+import random
 
 filename = "C:/Users/段/PycharmProjects/723_project/airlines.csv"
+
+# connect database
+conn = sqlite3.connect("airlines.db")
+cursor = conn.cursor()
+
+# create the bookings table for storing user booking information
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS bookings (
+        booking_ref TEXT PRIMARY KEY,
+        passport TEXT,
+        first_name TEXT,
+        last_name TEXT,
+        seat_row INTEGER,
+        seat_col TEXT
+    )
+''')
+conn.commit()
+
+# generates an 8-digit reference number
+def generate_booking_reference():
+    chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"  # lowercase letters not included
+    while True:
+        ref = ""
+        for _ in range(8):
+            ref += random.choice(chars)
+        # check that the reference number is not unique
+        cursor.execute("SELECT 1 FROM bookings WHERE booking_ref = ?", (ref,))
+        if not cursor.fetchone():
+            return ref
 
 # read CSV file and translate.
 def load_seat_map(filename):
     with open(filename, newline='') as f:
         reader = csv.reader(f)
-        header = next(reader)   # the first row displays labels, such as A, B, C, X, etc.
-        rows = [row for row in reader]  # each row represents a row of seats.
+        header = next(reader)
+        rows = [row for row in reader]
     return header, rows
 
 # save the current seat map back into the CSV file
@@ -20,14 +51,14 @@ def save_seat_map(filename, header, rows):
 # display the current seat status visually in the terminal
 def display_seat_map(header, rows):
     print("\nCurrent seat status:")
-    print("Row " + " ".join(header[1:]))    # print column headers (excluding the first blank space)
-
+    print("Row " + " ".join(header[1:]))
     for row in rows:
         row_display = f"{row[0]:>3} "
-
         for seat in row[1:]:
-            if seat in ['X', 'S', 'R']:
-                row_display += f"{seat} "   # display reserved seats / aisle / storage area.
+            if seat in ['X', 'S']:  # walkway or storage area
+                row_display += f"{seat} "
+            elif len(seat) == 8:    # if it is occupied by a reference number, it is considered to be booked
+                row_display += "* "
             else:
                 row_display += "F "
         print(row_display)
@@ -47,18 +78,15 @@ def find_seat_position(seat_input, column_names, seat_table):
 
     if row_number < 1 or row_number > len(seat_table):
         return None
-
     if col_letter not in column_names:
         return None
 
     row_index = row_number - 1
     col_index = column_names.index(col_letter)
-
     return row_index, col_index
 
-# check if a seat is available
+# only an 8-digit reference number is considered booked
 def check_if_seat_is_free(seat_table, column_names):
-
     seat_code = input("Enter seat like 54F: ").strip()
     position = find_seat_position(seat_code, column_names, seat_table)
 
@@ -69,14 +97,14 @@ def check_if_seat_is_free(seat_table, column_names):
     row_index, col_index = position
     seat_value = seat_table[row_index][col_index]
 
-    if seat_value == "R":
-        print(f"Seat {seat_code} is already booked.")
-    elif seat_value in ["X", "S"]:
+    if seat_value in ["X", "S"]:
         print(f"Seat {seat_code} is not an actual seat (it's an aisle or storage).")
+    elif len(seat_value) == 8:
+        print(f"Seat {seat_code} is already booked.")
     else:
         print(f"Seat {seat_code} is free and available.")
 
-# book a seat
+# check whether a seat is available
 def book_seat(rows, header):
     seat = input("Enter seat code to book (e.g. 54F): ").strip()
     pos = find_seat_position(seat, header, rows)
@@ -84,40 +112,59 @@ def book_seat(rows, header):
         print("Invalid seat code.")
         return
 
-    row_index = pos[0]
-    col_index = pos[1]
+    row_index, col_index = pos
+    current_value = rows[row_index][col_index]
 
-    if rows[row_index][col_index] == "R":
-        print("This seat is already booked.This seat is already booked.")
-    elif rows[row_index][col_index] in ["X", "S"]:
+    if len(current_value) == 8:     # the reference number has been used
+        print("This seat is already booked.")
+        return
+    if current_value in ["X", "S"]:
         print("This seat is not for people to sit on.")
-    else:
-        rows[row_index][col_index] = "R"
-        print(f"Seat {seat} has been successfully booked.")
+        return
 
-# release Seat
+    # enter passenger information
+    passport = input("Enter passport number: ").strip()
+    first_name = input("Enter first name: ").strip()
+    last_name = input("Enter last name: ").strip()
+    booking_ref = generate_booking_reference()
+
+    #update the seating map
+    rows[row_index][col_index] = booking_ref
+
+    # record passenger data into a database
+    cursor.execute('''
+        INSERT INTO bookings (booking_ref, passport, first_name, last_name, seat_row, seat_col)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (booking_ref, passport, first_name, last_name, row_index + 1, header[col_index]))
+    conn.commit()
+
+    print(f"Seat {seat} has been successfully booked.")
+    print(f"Booking Reference: {booking_ref}")
+
+# release seat
 def free_seat(rows, header):
     seat = input("Enter seat code to release (e.g. 54F): ").strip()
     pos = find_seat_position(seat, header, rows)
-
     if not pos:
         print("Invalid seat code.")
         return
 
-    row_index = pos[0]
-    col_index = pos[1]
+    row_index, col_index = pos
+    current_value = rows[row_index][col_index]
 
-    if rows[row_index][col_index] != "R":
-        print("This seat hasn't been reserved in advance, so there's no need to release it.")
-    else:
-        # Restore the original seat code (e.g. 54F)
-        seat_code = f"{row_index+1}{header[col_index]}"
-        rows[row_index][col_index] = seat_code
-        print(f"Seat {seat} has been released.")
+    if current_value in ["F", "X", "S"] or len(current_value) != 8:
+        print("This seat hasn't been reserved in advance.")
+        return
 
-# main menu loop
+    # delete the user's information from the database
+    cursor.execute("DELETE FROM bookings WHERE booking_ref = ?", (current_value,))
+    conn.commit()
+
+    rows[row_index][col_index] = f"{row_index + 1}{header[col_index]}"
+    print(f"Seat {seat} has been released.")
+
+# main interface
 def main():
-    filename = "airlines.csv"
     header, rows = load_seat_map(filename)
 
     while True:
@@ -140,11 +187,11 @@ def main():
         elif choice == "4":
             display_seat_map(header, rows)
         elif choice == "5":
-            print("Thank you")
+            print("Thank you!")
+            conn.close()
             break
         else:
-            print("You can only enter numbers from 1 to 5. If you enter something else, try again.")
+            print("Invalid input. Please select a number between 1 and 5.")
 
-# entry point
 if __name__ == "__main__":
     main()
